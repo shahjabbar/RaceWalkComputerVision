@@ -1,0 +1,59 @@
+import os
+import boto3
+import subprocess
+from urllib.parse import unquote_plus
+
+s3_client = boto3.client('s3')
+
+def lambda_handler(event, context):
+    # Parse S3 event details
+    for record in event['Records']:
+        bucket_name = record['s3']['bucket']['name']
+        object_key = unquote_plus(record['s3']['object']['key'])
+
+        # Check if the uploaded file is an MP4
+        if not object_key.lower().endswith('.mp4'):
+            print(f"File {object_key} is not an MP4. Skipping...")
+            continue
+
+        # Temporary file paths
+        temp_video_path = f"/tmp/{os.path.basename(object_key)}"
+        video_base_name = os.path.basename(object_key).split('.')[0] 
+        frames_output_dir = "/tmp/test/"
+
+        try:
+            # Download the video file from S3
+            print(f"Downloading {object_key} from bucket {bucket_name}")
+            s3_client.download_file(bucket_name, object_key, temp_video_path)
+
+            # Create a directory to store extracted frames
+            os.makedirs(frames_output_dir, exist_ok=True)
+
+            # Extract frames using ffmpeg
+            frame_pattern = os.path.join(frames_output_dir, f"{video_base_name}_%04d.jpg")
+            ffmpeg_command = [
+                "/opt/bin/ffmpeg",  # Path to the ffmpeg binary (use a Lambda Layer for ffmpeg)
+                "-i", temp_video_path,
+                frame_pattern
+            ]
+            subprocess.run(ffmpeg_command, check=True)
+            print(f"Frames extracted to {frames_output_dir}")
+
+            # Upload frames back to S3
+            for frame_file in os.listdir(frames_output_dir):
+                frame_path = os.path.join(frames_output_dir, frame_file)
+                s3_output_key = f"frames/{video_base_name}/{frame_file}"
+                s3_client.upload_file(frame_path, bucket_name, s3_output_key)
+                print(f"Uploaded {frame_file} to s3://{bucket_name}/{s3_output_key}")
+
+        except Exception as e:
+            print(f"Error processing file {object_key}: {e}")
+
+        finally:
+            # Clean up temporary files
+            if os.path.exists(temp_video_path):
+                os.remove(temp_video_path)
+            if os.path.exists(frames_output_dir):
+                for file in os.listdir(frames_output_dir):
+                    os.remove(os.path.join(frames_output_dir, file))
+            print("Temporary files cleaned up.")
